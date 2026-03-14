@@ -89,15 +89,34 @@ const pendingFlows = new Map<string, PendingFlow>();
 // ---------------------------------------------------------------------------
 
 /**
+ * 检查是否允许代授权：A 发起授权，B 来完成点击。
+ * 需要在 uat 配置里开启 allowDelegatedAuth 并在 delegatedAuthOpenIds 里同时列出两方 open_id。
+ */
+function isDelegatedAuthAllowed(
+  account: ConfiguredLarkAccount,
+  expectedOpenId: string,
+  actualOpenId: string,
+): boolean {
+  const uat = account.config.uat as
+    | { allowDelegatedAuth?: boolean; delegatedAuthOpenIds?: string[] }
+    | undefined;
+  if (!uat?.allowDelegatedAuth) return false;
+  const allowed = uat.delegatedAuthOpenIds ?? [];
+  return allowed.includes(expectedOpenId) && allowed.includes(actualOpenId);
+}
+
+/**
  * 使用刚获取的 UAT 调用 /authen/v1/user_info，
  * 验证实际完成 OAuth 授权的用户 open_id 是否与预期的 senderOpenId 一致。
  *
  * 防止群聊中其他用户点击授权链接后，错误的 UAT 被绑定到 owner 的身份。
+ * 例外：若配置了 allowDelegatedAuth + delegatedAuthOpenIds，则允许代授权。
  */
 async function verifyTokenIdentity(
   brand: string,
   accessToken: string,
   expectedOpenId: string,
+  account: ConfiguredLarkAccount,
 ): Promise<{ valid: boolean; actualOpenId?: string }> {
   const domain = brand === 'lark' ? 'https://open.larksuite.com' : 'https://open.feishu.cn';
   const url = `${domain}/open-apis/authen/v1/user_info`;
@@ -121,7 +140,7 @@ async function verifyTokenIdentity(
       return { valid: false };
     }
     return {
-      valid: actualOpenId === expectedOpenId,
+      valid: actualOpenId === expectedOpenId || isDelegatedAuthAllowed(account, expectedOpenId, actualOpenId),
       actualOpenId,
     };
   } catch (err) {
@@ -546,7 +565,7 @@ export async function executeAuthorize(
       }
       if (result.ok) {
         // ===== 身份校验：验证实际授权用户与发起人一致 =====
-        const identity = await verifyTokenIdentity(brand, result.token.accessToken, senderOpenId);
+        const identity = await verifyTokenIdentity(brand, result.token.accessToken, senderOpenId, account);
         if (!identity.valid) {
           log.warn(
             `identity mismatch! expected=${senderOpenId}, ` +
